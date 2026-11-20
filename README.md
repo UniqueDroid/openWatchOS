@@ -19,6 +19,8 @@ The programs still start from inside the stock firmware (OWLP launcher). The goa
 | `docs/hardware-m78.md` | board and parts: display, touch, keys, motor, pins |
 | `docs/firmware-interface.md` | the few stock firmware functions OWLP programs call, and how the stock firmware is paused |
 | `launcher/` | OWLP programs and their building blocks (own drivers, font, text, UI 1) |
+| `fw/` | parts of the future own firmware: watch face engine for the stock faces, LVGL interface, host simulator |
+| `docs/watchface-format.md` | the stock watch face file format |
 | `tools/build_owlp.py` | builds an OWLP program with the JieLi LLVM toolchain |
 | `oapps/` | JS apps for the watch |
 

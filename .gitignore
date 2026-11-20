@@ -1,2 +1,4 @@
 *.owl
 __pycache__/
+fw/sim/sim
+owf_cli
