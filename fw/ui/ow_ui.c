@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* openWatchOS user interface, see ow_ui.h. Dark, round, large touch targets; all colours on black (AMOLED). */
 #include "ow_ui.h"
+#include "lvgl_private.h"   /* image decoder descriptor */
 #include <stdio.h>
 
 LV_FONT_DECLARE(ow_font_20)
@@ -15,32 +16,71 @@ static lv_obj_t *tv, *tiles[5], *face, *ctl_time, *ctl_date, *ctl_btn[6], *act_a
 
 static lv_color_t hex(uint32_t c) { return lv_color_hex(c); }
 
-/* ---- watch face: the owf engine draws into the draw buffer ---- */
+/* ---- watch face: an image decoder that lets the owf engine draw the rows LVGL asks for ---- */
 
-static void face_draw(lv_event_t *e) {
-    lv_draw_ctx_t *dc = lv_event_get_draw_ctx(e);
-    lv_obj_t *obj = lv_event_get_target(e);
-    if (!st || !st->face) return;
-    lv_area_t a;
-    lv_obj_get_coords(obj, &a);
-    const lv_area_t *buf = dc->buf_area, *clip = dc->clip_area;
-    /* the engine draws whole screen rows: only when the face sits at x 0 with full width and the buffer is full width */
-    if (a.x1 != 0 || lv_area_get_width(&a) != OWF_W || buf->x1 != 0 || lv_area_get_width(buf) != OWF_W) return;
-    int y0 = clip->y1 > a.y1 ? clip->y1 : a.y1, y1 = clip->y2 < a.y2 ? clip->y2 : a.y2;
-    if (y0 > y1) return;
-    lv_color_t *px = (lv_color_t *)dc->buf + (y0 - buf->y1) * OWF_W;
-    /* screen row y of the face = y - a.y1 (the face moves with the tile while swiping) */
-    owf_band b = { (uint16_t *)px, y0 - a.y1, y1 - y0 + 1, LV_COLOR_16_SWAP };
-    for (int i = 0; i < b.rows * OWF_W; i++) px[i] = lv_color_black();
-    owf_render(st->face, st->face_len, &st->v, &b, 0);
+/* The image source is an lv_image_dsc_t whose data starts with this marker; the decoder hands LVGL bands of
+ * OWF_BAND full-width rows (RGB565). No screen buffer: a stock watch face costs one band of RAM. */
+#define OWF_BAND 40
+static const char FACE_MARK[4] = { 'O', 'W', 'F', '1' };
+static lv_image_dsc_t face_src = { .header = { .magic = LV_IMAGE_HEADER_MAGIC, .cf = LV_COLOR_FORMAT_RAW, .w = W, .h = H },
+                                   .data = (const uint8_t *)FACE_MARK, .data_size = sizeof FACE_MARK };
+
+static int is_face(const void *src, lv_image_src_t type) {
+    return type == LV_IMAGE_SRC_VARIABLE && src == &face_src;
+}
+
+static lv_result_t face_info(lv_image_decoder_t *d, lv_image_decoder_dsc_t *dsc, lv_image_header_t *h) {
+    LV_UNUSED(d);
+    if (!is_face(dsc->src, dsc->src_type)) return LV_RESULT_INVALID;
+    lv_memzero(h, sizeof *h);
+    h->magic = LV_IMAGE_HEADER_MAGIC; h->cf = LV_COLOR_FORMAT_RGB565; h->w = W; h->h = H; h->stride = W * 2;
+    return LV_RESULT_OK;
+}
+
+static lv_result_t face_open(lv_image_decoder_t *d, lv_image_decoder_dsc_t *dsc) {
+    LV_UNUSED(d);
+    if (!is_face(dsc->src, dsc->src_type)) return LV_RESULT_INVALID;
+    dsc->decoded = NULL;   /* drawn in bands by face_area */
+    return LV_RESULT_OK;
+}
+
+static lv_result_t face_area(lv_image_decoder_t *d, lv_image_decoder_dsc_t *dsc, const lv_area_t *full, lv_area_t *done) {
+    LV_UNUSED(d);
+    lv_draw_buf_t *buf = (lv_draw_buf_t *)dsc->decoded;
+    if (done->y1 == LV_COORD_MIN) {
+        if (!buf) buf = lv_draw_buf_create(W, OWF_BAND, LV_COLOR_FORMAT_RGB565, W * 2);
+        if (!buf) return LV_RESULT_INVALID;
+        dsc->decoded = buf;
+        done->y1 = full->y1;
+    } else done->y1 = done->y2 + 1;
+    if (done->y1 > full->y2) return LV_RESULT_INVALID;
+    done->x1 = 0; done->x2 = W - 1;   /* always whole rows: the engine draws full width */
+    done->y2 = done->y1 + OWF_BAND - 1 < full->y2 ? done->y1 + OWF_BAND - 1 : full->y2;
+    owf_band b = { (uint16_t *)buf->data, done->y1, done->y2 - done->y1 + 1, 0 };
+    lv_memzero(buf->data, (size_t)b.rows * W * 2);
+    if (st && st->face) owf_render(st->face, st->face_len, &st->v, &b, 0);
+    return LV_RESULT_OK;
+}
+
+static void face_close(lv_image_decoder_t *d, lv_image_decoder_dsc_t *dsc) {
+    LV_UNUSED(d);
+    if (dsc->decoded) lv_draw_buf_destroy((lv_draw_buf_t *)dsc->decoded);
+    dsc->decoded = NULL;
 }
 
 static lv_obj_t *face_create(lv_obj_t *parent) {
-    lv_obj_t *o = lv_obj_create(parent);
-    lv_obj_remove_style_all(o);
-    lv_obj_set_size(o, W, H);
-    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(o, face_draw, LV_EVENT_DRAW_MAIN, 0);
+    static lv_image_decoder_t *dec;
+    if (!dec) {
+        dec = lv_image_decoder_create();
+        lv_image_decoder_set_info_cb(dec, face_info);
+        lv_image_decoder_set_open_cb(dec, face_open);
+        lv_image_decoder_set_get_area_cb(dec, face_area);
+        lv_image_decoder_set_close_cb(dec, face_close);
+    }
+    lv_obj_t *o = lv_image_create(parent);
+    lv_image_set_src(o, &face_src);
+    lv_obj_set_clickable(o, false);
+    lv_obj_set_scrollable(o, false);
     return o;
 }
 
@@ -63,7 +103,8 @@ static lv_obj_t *round_icon(lv_obj_t *parent, int size, uint32_t colour, const c
     lv_obj_set_style_bg_color(c, hex(colour), 0);
     lv_obj_set_style_bg_grad_color(c, lv_color_darken(hex(colour), 60), 0);
     lv_obj_set_style_bg_grad_dir(c, LV_GRAD_DIR_VER, 0);
-    lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_scrollable(c, false);
+    lv_obj_set_clickable(c, false);
     lv_obj_t *s = label(c, &ow_font_28, 0xFFFFFF, symbol);
     lv_obj_center(s);
     return c;
@@ -102,7 +143,7 @@ static void apps_create(lv_obj_t *t) {
         lv_obj_set_style_bg_color(row, hex(0x2C2C2E), LV_STATE_PRESSED);
         lv_obj_set_style_pad_left(row, 10, 0);
         lv_obj_set_style_translate_x(row, 16, 0);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_clickable(row, true);
         lv_obj_t *ic = round_icon(row, 58, APPS[i].colour, APPS[i].symbol);
         lv_obj_align(ic, LV_ALIGN_LEFT_MID, 0, 0);
         lv_obj_t *l = label(row, &ow_font_28, 0xFFFFFF, APPS[i].name);
@@ -140,7 +181,7 @@ static void control_create(lv_obj_t *t) {
         lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
         lv_obj_set_pos(b, 22 + (i % 3) * 112, 150 + (i / 3) * 136);
-        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_clickable(b, true);
         lv_obj_add_event_cb(b, ctl_toggle, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         lv_obj_t *s = label(b, &ow_font_28, 0xFFFFFF, CTL[i].symbol);
         lv_obj_center(s);
@@ -169,7 +210,7 @@ static void activity_create(lv_obj_t *t) {
         lv_arc_set_bg_angles(arc, 0, 360);
         lv_arc_set_rotation(arc, 270);
         lv_obj_remove_style(arc, 0, LV_PART_KNOB);
-        lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_clickable(arc, false);
         lv_obj_set_style_arc_width(arc, 22, LV_PART_MAIN);
         lv_obj_set_style_arc_width(arc, 22, LV_PART_INDICATOR);
         lv_obj_set_style_arc_color(arc, lv_color_darken(hex(ACT[i].colour), 190), LV_PART_MAIN);
@@ -224,7 +265,7 @@ static void notes_fill(void) {
 
 void ow_ui_create(ow_state *s) {
     st = s;
-    lv_obj_t *scr = lv_scr_act();
+    lv_obj_t *scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     lv_obj_set_style_text_color(scr, lv_color_white(), 0);
     tv = lv_tileview_create(scr);
@@ -246,14 +287,14 @@ void ow_ui_create(ow_state *s) {
 
 void ow_ui_show(int tile) {
     static const uint8_t col[5] = { 0, 1, 2, 1, 1 }, row[5] = { 1, 1, 1, 0, 2 };
-    lv_obj_set_tile_id(tv, col[tile], row[tile], LV_ANIM_OFF);
+    lv_tileview_set_tile_by_index(tv, col[tile], row[tile], LV_ANIM_OFF);
 }
 
 void ow_ui_update(void) {
     static const char *const WD[7] = { "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag" };
     char t[48];
     const owf_values *v = &st->v;
-    lv_obj_invalidate(face);
+    lv_obj_invalidate(face);   /* new values: LVGL asks the decoder for the bands again */
     lv_label_set_text_fmt(ctl_time, "%02u:%02u", v->hour, v->minute);
     snprintf(t, sizeof t, "%s, %u.%u.  " LV_SYMBOL_BATTERY_FULL " %u %%", WD[v->weekday % 7], v->day, v->month, v->battery);
     lv_label_set_text(ctl_date, t);

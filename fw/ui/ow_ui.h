@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef OW_UI_H
 #define OW_UI_H
-/* openWatchOS user interface on LVGL 8.3 (the version of the JieLi watch SDK).
+/* openWatchOS user interface on LVGL 9.6.
  *
  * Layout (swipe like the stock firmware):
  *                 control centre
@@ -9,7 +9,7 @@
  *   activity  <-   watch face   ->  apps
  *                       v (swipe up)
  *                 notifications
- * The watch face is a stock watch face file ("JL" format, fw/owf), drawn directly into LVGL's draw buffer.
+ * The watch face is a stock watch face file ("JL" format, fw/owf), handed to LVGL in bands by an image decoder.
  */
 #include "lvgl.h"
 #include "../owf/owf.h"

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* openWatchOS host simulator: runs the LVGL interface (fw/ui) without a window and writes every tile as a PPM
- * picture. The display driver works like on the watch: a draw buffer of 368 x 40 rows, RGB565 high byte first.
+ * picture. The display works like on the watch: a draw buffer of 368 x 40 rows, flushed as RGB565 high byte first.
  *   sim FACE OUTDIR
  */
 #include "lvgl.h"
@@ -9,12 +9,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-static lv_color_t screen[368 * 448];
+static uint16_t screen[368 * 448];   /* what the panel would get: RGB565, high byte first */
 
-static void flush(lv_disp_drv_t *drv, const lv_area_t *a, lv_color_t *px) {
+static void flush(lv_display_t *disp, const lv_area_t *a, uint8_t *px) {
+    uint32_t w = (uint32_t)lv_area_get_width(a);
+    lv_draw_sw_rgb565_swap(px, w * (uint32_t)lv_area_get_height(a));   /* as the watch's flush does for the panel */
     for (int y = a->y1; y <= a->y2; y++)
-        memcpy(&screen[y * 368 + a->x1], px + (y - a->y1) * lv_area_get_width(a), lv_area_get_width(a) * sizeof(lv_color_t));
-    lv_disp_flush_ready(drv);
+        memcpy(&screen[y * 368 + a->x1], px + (size_t)(y - a->y1) * w * 2, w * 2);
+    lv_display_flush_ready(disp);
 }
 
 static void save(const char *dir, const char *name) {
@@ -24,7 +26,7 @@ static void save(const char *dir, const char *name) {
     if (!f) { perror(path); exit(1); }
     fprintf(f, "P6\n368 448\n255\n");
     for (int i = 0; i < 368 * 448; i++) {
-        uint16_t v = screen[i].full;
+        uint16_t v = screen[i];
         v = (uint16_t)(v >> 8 | v << 8);   /* stored high byte first */
         uint8_t rgb[3] = { (uint8_t)((v >> 11) * 255 / 31), (uint8_t)(((v >> 5) & 63) * 255 / 63), (uint8_t)((v & 31) * 255 / 31) };
         fwrite(rgb, 1, 3, f);
@@ -42,13 +44,10 @@ int main(int argc, char **argv) {
     fclose(f);
 
     lv_init();
-    static lv_disp_draw_buf_t db;
-    static lv_color_t buf[368 * 40];
-    lv_disp_draw_buf_init(&db, buf, 0, 368 * 40);
-    static lv_disp_drv_t drv;
-    lv_disp_drv_init(&drv);
-    drv.hor_res = 368; drv.ver_res = 448; drv.flush_cb = flush; drv.draw_buf = &db;
-    lv_disp_drv_register(&drv);
+    lv_display_t *disp = lv_display_create(368, 448);
+    static uint8_t buf[368 * 40 * 2];   /* draw buffer of 40 rows, as on the watch */
+    lv_display_set_buffers(disp, buf, NULL, sizeof buf, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_flush_cb(disp, flush);
 
     static ow_state s = {
         .v = { .hour = 10, .minute = 8, .second = 34, .day = 20, .month = 11, .year = 2026, .weekday = 4, .battery = 80,
@@ -63,8 +62,8 @@ int main(int argc, char **argv) {
     static const char *const names[5] = { "activity", "face", "apps", "control", "notes" };
     for (int t = 0; t < 5; t++) {
         ow_ui_show(t);
-        lv_obj_invalidate(lv_scr_act());
-        lv_refr_now(0);
+        lv_obj_invalidate(lv_screen_active());
+        lv_refr_now(disp);
         save(argv[2], names[t]);
     }
     return 0;

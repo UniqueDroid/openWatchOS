@@ -1,5 +1,5 @@
-# openWatchOS host simulator. LVGL v8.3.6 (the version of the watch SDK) is not part of this repository:
-#   git clone --depth 1 --branch v8.3.6 https://github.com/lvgl/lvgl.git ../../../lvgl   (or set LVGL=...)
+# openWatchOS host simulator. LVGL v9.6.0 is not part of this repository:
+#   git clone --depth 1 --branch v9.6.0 https://github.com/lvgl/lvgl.git ../../../lvgl   (or set LVGL=...)
 #   make && ./sim FACE.di out/    (writes activity, face, apps, control, notes as PPM)
 LVGL ?= ../../../lvgl
 CC ?= gcc
